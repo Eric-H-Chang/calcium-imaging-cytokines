@@ -1,0 +1,318 @@
+def extract_info(file):
+#get the information out of the pickle file
+#input is: the file name of the pkl
+#output is:
+    #C which is the traces for each ROI, 
+    #coordinates which ahs coordiantes for each ROI, 
+    #and com which is center of mass of each ROI
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import pickle
+    data = pickle.load(open(file,'rb'))
+    C = data['C_array']
+    #S = data['S_array']
+    coords = data['coords']
+    coordinates = []
+    com = []
+    print(data.keys())
+    return C, coordinates, com
+
+def find_edges(data,max_x,base):
+#find edges
+#Input is data_xxx which is all the traces, and max_x which is the frame where the max peak is in find_responders
+#Output is left and right edges of the response
+    #base = np.mean(data[0:(int(np.round(len(data)*0.8)))]) #baseline is average of lower 80% of data points
+    '''
+    if np.min(data)>0.005:
+        base = np.mean(data[:200])
+    else: 
+        base = 0.005
+    '''
+    start = max_x
+    i = data[start]
+    l_frames=0
+    r_frames=0
+    while (i>base) & (start>1):
+        start=start-1
+        i=data[start]
+        l_frames=l_frames+1
+
+    start = max_x 
+    i =data[start]
+    while (i>base) & (start<len(data)-1):
+        start=start+1
+        i=data[start]
+        r_frames=r_frames+1
+    l = max_x-l_frames
+    r = max_x+r_frames
+    return l, r
+
+def find_responders(data, dose, **kwargs):
+#find which cells are responders and the features of the response
+# Input is:
+    #data_xx which is the traces for every ROI
+    #coords which is the coordinates for every ROI
+    #dose which is the frame window of the stimlus [xxxx,xxxx]
+    #control which is the frame window of the saline [xxxx,xxxx]
+    #params is the parameters for find peaks which is height, prominence, and width
+# Output is a dictionary with a bunch of variables:
+    #time which converts frames to seconds
+    #responders which is all the cells that responded during dose window
+    #noisy saline which are all the responders that also had noisy saline windows and were excluded
+    #slope is height/rise time for response
+    #rise time is from beginning of response to peak
+    #decay time is from peak to end of response
+    #width is length of response
+    #height is amplitude of peak
+    #num peaks is number of peaks above threshold during stimulus window
+    #x_roi is all of the x coordinates for each ROI (easier for making scatter plots)
+    #y_roi is all of the y coordinates for each ROI
+    #integral_resp is the integral of the response
+    #integral_dose is the integral of the whole dose window
+    #integral_saline is the integral of the whole saline window
+    
+    import numpy as np
+    import pandas as pd
+    import os
+    import scipy.signal as sig
+    from scipy import integrate
+    #convert frames to time
+    fr = 20 # Update here
+    time = np.arange(0,3000,1)/fr # Update here
+    
+    #initialize lists to add variables
+    responders = []
+    noisy_saline = []
+    rise_time_max = []; decay_time_max = []; width_max = []; height_max = []; integral_max = []; slope_max = []
+    rise_time_all = []; decay_time_all = []; width_all = []; integral_all = []; slope_all = []
+    rise_time_avg = []; decay_time_avg = []; width_avg = []; integral_avg = []; slope_avg = []
+    integral_dose = []; integral_saline = []; dose_trace = []; dose_sum = []; num_peaks = []; peak_info = []; 
+    peak_time = []; peak_heights = []; avg_peak_heights = []; peak_traces = []; peak_traces_ext = [] ; x_roi = []; y_roi = []
+    #h=params['h']; p =params['p']; w =params['w'];
+    peak_traces_C_Index = []
+    j = 0
+    #specify frames to look at for control and stimulus window
+    #loop through each ROI
+    for i in range(np.shape(data)[0]): 
+        j= j+1
+        #set peak height based on baseline
+        sort_data = np.sort(data[i])
+        baseline = np.mean(sort_data[0:(int(np.round(len(sort_data)*0.8)))]) #baseline is average of lower 80* of data points
+        variation = np.std(sort_data[0:(int(np.round(len(sort_data)*0.8)))])
+        w = 10
+        p=baseline+3*variation
+        h=baseline+3*variation
+        rise_time_cell = []; decay_time_cell = []; width_cell = []; height_cell = []; integral_cell = []; slope_cell = []
+        dose_data = data[:,dose:dose+2000] # Update here
+        control_data = data[:, :dose]
+        trace_data = data[:, :dose+2000] # Update here
+       
+        
+        #get rid of cells with no activity
+        if abs(np.max(data))-abs(np.min(data))>.009:
+        
+            #Look for peaks in dose interval
+            if sig.find_peaks(dose_data[i],height=h,prominence = p,width = w)[0].shape[0]>0: 
+
+                #find max  peak amplitude in stimulus window
+                peaks = []
+                peaks = sig.find_peaks(dose_data[i],height=h,prominence=p,width=w)
+                max_peak = np.max(peaks[1]['peak_heights'])
+
+                #look if there are saline peaks 50% height of stimulus peaks
+                saline_peaks, _ = sig.find_peaks(control_data[i],height =0.5*max_peak,width=w) #saline
+
+                if len(saline_peaks)>0: #Exclude for cells with noisy saline periods
+                    noisy_saline.append(i)
+
+                else: #responders without peaks in saline
+                    responders.append(i)
+                    num_peaks.append(len(peaks[0]))
+                    peak_time.append(peaks[0][0])
+                    peak_heights.append(peaks[1]['peak_heights']*100)
+                    avg_peak_heights.append(np.mean(peaks[1]['peak_heights']*100))
+                    
+                    #find integral of whole control and stimulus window
+                    integral_dose.append(integrate.simps(dose_data[i]))
+                    integral_saline.append(integrate.simps(control_data[i]))
+                    #find sum
+                    dose_sum.append(sum(dose_data[i]))
+                    
+                     # Modify this part to include the 20 frames prior to the response
+                for ii in range(0, len(peaks[0])):
+                    x_peak = peaks[0][ii]
+                    l_peak, r_peak = find_edges(dose_data[i], x_peak, baseline)
+                    # Adjust the starting frame to be 20 frames prior to the response
+                    l_trace_start = max(0, l_peak - 20)  # Ensure it doesn't go below frame 0
+                    peak_traces.append(dose_data[i][l_trace_start:r_peak])
+                    peak_traces_ext.append(dose_data[i][l_trace_start-80:r_peak])
+                    peak_traces_C_Index.append(i)
+                    rise_time_cell.append(x_peak - l_peak)
+                    decay_time_cell.append(r_peak - x_peak)
+                    width_cell.append(r_peak - l_peak)
+                    integral_cell.append(integrate.simps(dose_data[i, l_trace_start:r_peak]))
+                    slope_cell.append(((peaks[1]['peak_heights'][ii]) * 100) / (x_peak - l_peak))
+
+                rise_time_all.append(rise_time_cell); decay_time_all.append(decay_time_cell) 
+                width_all.append(width_cell); integral_all.append(integral_cell); slope_all.append(slope_cell)
+                rise_time_avg.append(np.mean(rise_time_cell)); decay_time_avg.append(np.mean(decay_time_cell)) 
+                width_avg.append(np.mean(width_cell)); integral_avg.append(np.mean(integral_cell)) 
+                slope_avg.append(np.mean(slope_cell));
+
+                    #find features of max peak
+                max_x =  peaks[0][np.where(peaks[1]['peak_heights']==np.max(peaks[1]['peak_heights']))][0] #find x value of biggest peak
+
+                    #find edges
+                l, r = find_edges(dose_data[i],max_x,baseline)
+
+                    #Calculate features of biggest response in stimulus window
+                rise_time_max.append(max_x-l)
+                decay_time_max.append(r-max_x)
+                width_max.append(r-l)
+                height_max.append(np.max(peaks[1]['peak_heights'])*100)
+                #integral_max.append(integrate.simps(dose_data[i,l:r]))
+                slope_max.append((np.max(peaks[1]['peak_heights'])*100)/(max_x-l))
+                peak_info.append(peaks)
+                dose_trace.append(trace_data[i])
+
+    #flip dose trace to be in excel
+    dose_trace = np.transpose(dose_trace)
+    file=kwargs.get('f')
+    #if file == None:
+       # print('artifacts, dont save')
+  #  else:
+      #  if os.path.exists(file):
+       #     os.remove(file)   
+       # pd.DataFrame(dose_trace).to_excel(file)
+    
+    info = {'time':time,'responders':responders, "noisy_saline":noisy_saline, "slope_max":slope_max, 
+            "rise_time_max":rise_time_max, "decay_time_max":decay_time_max, "width_max":width_max, "height_max":height_max, 
+            "slope_all":slope_all, "rise_time_all":rise_time_all, "decay_time_all":decay_time_all, "width_all":width_all, 
+            "integral_all":integral_all, "slope_avg":slope_avg, "rise_time_avg":rise_time_avg, 
+            "decay_time_avg":decay_time_avg, "width_avg":width_avg, "integral_avg":integral_avg,'peak_time':peak_time,
+            "peak_heights":peak_heights, "avg_peak_heights":avg_peak_heights, "peak_traces":peak_traces,
+            "num_peaks":num_peaks,"x_roi":x_roi,"y_roi":y_roi, "integral_max":integral_max, "integral_dose":integral_dose,
+            "integral_saline":integral_saline,"dose_sum":dose_sum,"peak_info":peak_info, "dose_trace":dose_trace, "peak_traces_C_Index":peak_traces_C_Index, "peak_traces_ext":peak_traces_ext}
+
+    return info
+
+def analyze_baseline(data, **kwargs):
+    import numpy as np
+    import pandas as pd
+    import os
+    import scipy.signal as sig
+    from scipy import integrate
+    #convert frames to time
+    fr = 20
+    time = np.arange(0,1000,1)/fr
+    #initialize lists to add variables
+    rise_time_max = []; decay_time_max = []; width_max = []; height_max = []; integral_max = []; slope_max = []
+    rise_time_all = []; decay_time_all = []; width_all = []; integral_all = []; slope_all = []
+    rise_time_avg = []; decay_time_avg = []; width_avg = []; integral_avg = []; slope_avg = []
+    integral_trace = []; data_trace = []; trace_sum = []; num_peaks = []; peak_info = []; peak_time = [] 
+    peak_heights = []; avg_peak_heights = []; peak_traces = []; active_cells = []; baseline_list = []; variation_list = []
+    x_roi = []
+    y_roi = []
+    #h=params['h']; p =params['p']; w =params['w'];
+
+# Save the transposed DataFrame to an Excel file
+
+    #loop through each ROI
+    for i in range(np.shape(data)[0]): 
+        
+        #set peak height based on baseline
+        sort_data = np.sort(data[i][data[i]>0])
+        baseline = np.mean(sort_data[0:(int(np.round(len(sort_data)*0.8)))]) #baseline is average of lower 80% of data points
+        variation = np.std(sort_data[0:(int(np.round(len(sort_data)*0.8)))])
+        baseline_list.append(baseline)
+        variation_list.append(variation)
+        w = 10
+        p=baseline+3*variation
+        h=baseline+3*variation
+        rise_time_cell = []; decay_time_cell = []; width_cell = []; height_cell = []; integral_cell = []; slope_cell = []
+        x = []
+        y= []
+        #make 2 sepearte lists for x and y coordinates for each ROI
+
+        if abs(np.max(data))-abs(np.min(data))>.009:
+            if sig.find_peaks(data[i],height=h,prominence = p,width = w)[0].shape[0]>0: 
+                active_cells.append(i)
+                #find max  peak amplitude in stimulus window
+                peaks = sig.find_peaks(data[i],height=h,prominence=p,width=w)
+
+                max_peak = np.max(peaks[1]['peak_heights'])
+
+                num_peaks.append(len(peaks[0]))
+                peak_time.append(peaks[0][0])
+                peak_heights.append(peaks[1]['peak_heights']*100)
+                avg_peak_heights.append(np.mean(peaks[1]['peak_heights']*100))
+
+                #find integral of whole control and stimulus window
+                integral_trace.append(integrate.simps(data[i]))
+                #find sum
+                trace_sum.append(sum(data[i]))
+                #find features of each peak
+                for ii in range(0,len(peaks[0])):
+                    x_peak = peaks[0][ii]
+                    l_peak, r_peak = find_edges(data[i],x_peak,baseline)
+                    peak_traces.append(data[i][l_peak:r_peak])
+                    rise_time_cell.append(x_peak-l_peak)
+                    decay_time_cell.append(r_peak-x_peak)
+                    width_cell.append(r_peak-l_peak)
+                    integral_cell.append(integrate.simps(data[i,l_peak:r_peak]))
+                    slope_cell.append(((peaks[1]['peak_heights'][ii])*100)/(x_peak-l_peak))
+
+                rise_time_all.append(rise_time_cell); decay_time_all.append(decay_time_cell); width_all.append(width_cell)
+                integral_all.append(integral_cell); slope_all.append(slope_cell) 
+                rise_time_avg.append(np.mean(rise_time_cell)); decay_time_avg.append(np.mean(decay_time_cell))
+                width_avg.append(np.mean(width_cell)); integral_avg.append(np.mean(integral_cell))
+                slope_avg.append(np.mean(slope_cell))
+
+                #find features of max peak
+                max_x =  peaks[0][np.where(peaks[1]['peak_heights']==np.max(peaks[1]['peak_heights']))][0] #find x value of biggest peak
+
+                #find edges
+                l, r = find_edges(data[i],max_x,baseline)
+
+                #Calculate features of biggest response in stimulus window
+                rise_time_max.append(max_x-l)
+                decay_time_max.append(r-max_x)
+                width_max.append(r-l)
+                height_max.append(np.max(peaks[1]['peak_heights'])*100)
+                integral_max.append(integrate.simps(data[i,l:r]))
+                slope_max.append((np.max(peaks[1]['peak_heights'])*100)/(max_x-l))
+                peak_info.append(peaks)
+                data_trace.append(data[i])
+
+    #flip dose trace to be in excel
+    data_trace = np.transpose(data_trace)
+    file=kwargs.get('f')
+    if file == None:
+        print('artifacts, dont save')
+    else:
+        if os.path.exists(file):
+            os.remove(file)   
+        pd.DataFrame(data_trace).to_excel(file)
+    
+    info = {'time':time, "active_cells":active_cells,"slope_max":slope_max, "rise_time_max":rise_time_max, 
+            "decay_time_max":decay_time_max, "width_max":width_max, "height_max":height_max, "slope_all":slope_all, 
+            "rise_time_all":rise_time_all, "decay_time_all":decay_time_all, "width_all":width_all, 
+            "integral_all":integral_all, "slope_avg":slope_avg, "rise_time_avg":rise_time_avg, 
+            "decay_time_avg":decay_time_avg, "width_avg":width_avg, "integral_avg":integral_avg, "peak_time":peak_time, 
+            "peak_heights":peak_heights, "avg_peak_heights":avg_peak_heights, "peak_traces":peak_traces,
+            "baseline_list":baseline_list,"variation_list":variation_list, "num_peaks":num_peaks,"x_roi":x_roi,
+            "y_roi":y_roi, "integral_max":integral_max, "integral_trace":integral_trace,"trace_sum":trace_sum,
+            "peak_info":peak_info, "data_trace":data_trace}
+
+    return info
+
+
+
+
+def save_data(*args):
+    #saves features in a csv
+    #last arg has to be the filename
+    import numpy as np
+    import pandas as pd
+    data = args[0:len(args)-1]
+    pd.DataFrame(data).to_csv(args[-1])
